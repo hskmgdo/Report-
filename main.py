@@ -12,7 +12,7 @@ import threading
 import re
 
 # ==================== تنظیمات ====================
-BOT_TOKEN = "8810741889:AAF9h94CG7dmkvJRd3SHNH1npwezAi2wQ1A"
+BOT_TOKEN = "8423981755:AAFaEYzOefEaxDiuyvKKyyTJzlhDXWSqyRw"
 ADMIN_IDS = [8916314219]
 CHANNEL_ID = "@rezagrootz"
 
