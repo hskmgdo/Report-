@@ -69,7 +69,61 @@ def back_button():
 # ==================== روش‌های دانلود ====================
 class InstagramDownloader:
     
-    # ===== روش 1: استفاده از instaloader =====
+    # ---- ابزار کمکی برای پیدا کردن فایل‌ها به صورت بازگشتی ----
+    @staticmethod
+    def find_media_files(directory):
+        media_files = []
+        for root, dirs, files in os.walk(directory):
+            for file in files:
+                file_path = os.path.join(root, file)
+                if os.path.isfile(file_path):
+                    ext = os.path.splitext(file)[1].lower()
+                    if ext in ('.mp4', '.mov', '.avi', '.mkv'):
+                        media_files.append(('video', file_path))
+                    elif ext in ('.mp3', '.m4a', '.aac'):
+                        media_files.append(('audio', file_path))
+                    elif ext in ('.jpg', '.jpeg', '.png', '.gif', '.webp'):
+                        media_files.append(('photo', file_path))
+        return media_files
+
+    # ===== روش 1: yt-dlp (اولویت برای ویدیو + استخراج صدا) =====
+    @staticmethod
+    def method_ytdlp(url, temp_dir):
+        try:
+            ydl_opts = {
+                'outtmpl': f'{temp_dir}/%(title)s.%(ext)s',
+                'quiet': True,
+                'no_warnings': True,
+                'extract_flat': False,
+                'format': 'best[ext=mp4]/best',
+                'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'mp3',
+                    'preferredquality': '192',
+                }],
+                'keepvideo': True,  # نگه‌داشتن فایل ویدیو پس از استخراج صدا
+            }
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                if info:
+                    # پیدا کردن فایل‌های دانلود شده
+                    base_filename = ydl.prepare_filename(info)
+                    # حذف پسوند برای پیدا کردن فایل‌های مرتبط
+                    base_no_ext = os.path.splitext(base_filename)[0]
+                    
+                    # اسکن پوشه برای یافتن همه فایل‌های رسانه‌ای
+                    media_files = InstagramDownloader.find_media_files(temp_dir)
+                    if media_files:
+                        username = info.get('uploader', 'instagram')
+                        caption = info.get('description', '')
+                        return media_files, username, caption
+            return None, None, "yt-dlp: فایلی پیدا نشد"
+        except Exception as e:
+            return None, None, f"yt-dlp: {str(e)[:100]}"
+
+    # ===== روش 2: instaloader (برای عکس و ویدیو بدون صدا) =====
     @staticmethod
     def method_instaloader(url, temp_dir):
         try:
@@ -84,54 +138,23 @@ class InstagramDownloader:
             )
             loader.quiet = True
             loader.sleep = True
-            loader.dirname_pattern = temp_dir
+            loader.dirname_pattern = temp_dir  # پوشه اصلی
             
             post = instaloader.Post.from_url(loader.context, url)
-            loader.download_post(post, target=f"{temp_dir}/{post.owner_username}")
+            loader.download_post(post, target=temp_dir)  # دانلود مستقیم در temp_dir
             
-            # پیدا کردن فایل‌ها
-            files = os.listdir(temp_dir)
-            media_files = []
-            for file in files:
-                file_path = os.path.join(temp_dir, file)
-                if os.path.isfile(file_path):
-                    if file.endswith(('.mp4', '.mov', '.avi')):
-                        media_files.append(('video', file_path))
-                    elif file.endswith(('.jpg', '.jpeg', '.png', '.gif')):
-                        media_files.append(('photo', file_path))
-            
-            return media_files, post.owner_username, post.caption
+            # اسکن بازگشتی پوشه برای یافتن فایل‌ها
+            media_files = InstagramDownloader.find_media_files(temp_dir)
+            if media_files:
+                return media_files, post.owner_username, post.caption
+            return None, None, "instaloader: فایلی پیدا نشد"
         except Exception as e:
             return None, None, f"instaloader: {str(e)[:100]}"
-    
-    # ===== روش 2: استفاده از yt-dlp (برای ریل و ویدیو) =====
-    @staticmethod
-    def method_ytdlp(url, temp_dir):
-        try:
-            ydl_opts = {
-                'outtmpl': f'{temp_dir}/%(title)s.%(ext)s',
-                'quiet': True,
-                'no_warnings': True,
-                'extract_flat': False,
-                'format': 'best[ext=mp4]/best',
-                'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
-            
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                if info:
-                    filename = ydl.prepare_filename(info)
-                    if os.path.exists(filename):
-                        return [('video', filename)], info.get('uploader', 'instagram'), info.get('description', '')
-            return None, None, "yt-dlp: فایلی پیدا نشد"
-        except Exception as e:
-            return None, None, f"yt-dlp: {str(e)[:100]}"
-    
-    # ===== روش 3: استفاده از API سایت‌های دانلود (snapinsta) =====
+
+    # ===== روش 3: API (snapinsta) =====
     @staticmethod
     def method_api(url, temp_dir):
         try:
-            # استفاده از API رایگان snapinsta
             response = requests.post(
                 'https://snapinsta.app/api/ajaxSearch',
                 data={'q': url},
@@ -145,9 +168,9 @@ class InstagramDownloader:
             if response.status_code == 200:
                 data = response.json()
                 if data.get('success') and data.get('data'):
+                    # برای ویدیو
                     video_url = data['data'][0].get('url')
                     if video_url:
-                        # دانلود فایل
                         response = requests.get(video_url, stream=True, timeout=30)
                         if response.status_code == 200:
                             filename = f"{temp_dir}/video_{int(time.time())}.mp4"
@@ -155,11 +178,24 @@ class InstagramDownloader:
                                 for chunk in response.iter_content(chunk_size=1024*1024):
                                     if chunk:
                                         f.write(chunk)
-                            return [('video', filename)], 'instagram', 'دانلود شده با snapinsta'
+                            media_files = [('video', filename)]
+                            return media_files, 'instagram', 'دانلود شده با snapinsta'
+                    # برای عکس
+                    image_url = data['data'][0].get('url')
+                    if image_url:
+                        response = requests.get(image_url, stream=True, timeout=30)
+                        if response.status_code == 200:
+                            filename = f"{temp_dir}/photo_{int(time.time())}.jpg"
+                            with open(filename, 'wb') as f:
+                                for chunk in response.iter_content(chunk_size=1024*1024):
+                                    if chunk:
+                                        f.write(chunk)
+                            media_files = [('photo', filename)]
+                            return media_files, 'instagram', 'دانلود شده با snapinsta'
             return None, None, "API: خطا در دریافت لینک"
         except Exception as e:
             return None, None, f"API: {str(e)[:100]}"
-    
+
     # ===== متد اصلی =====
     @staticmethod
     def download(url, user_id):
@@ -167,9 +203,10 @@ class InstagramDownloader:
         os.makedirs(temp_dir, exist_ok=True)
         
         results = []
+        # ترتیب: yt-dlp اول (برای ویدیو+صدا)، سپس instaloader، سپس API
         methods = [
-            ('instaloader', InstagramDownloader.method_instaloader),
             ('yt-dlp', InstagramDownloader.method_ytdlp),
+            ('instaloader', InstagramDownloader.method_instaloader),
             ('API', InstagramDownloader.method_api)
         ]
         
@@ -202,15 +239,14 @@ def start_command(message: Message):
 📥 <b>ربات دانلود اینستاگرام REZA GROOTZ</b> 📥
 
 ⚡️ <b>قابلیت‌ها:</b>
-✅ دانلود با ۳ روش مختلف
-✅ پشتیبانی از پست، ریل، ویدیو
-✅ دانلود عکس
-✅ سرعت بالا
-✅ کاملاً رایگان
+✅ دانلود عکس و ویدیو
+✅ استخراج صدا از ویدیو (MP3)
+✅ ۳ روش دانلود پشتیبان
+✅ سرعت بالا و کاملاً رایگان
 
 📌 <b>چطور استفاده کنم؟</b>
 🔹 لینک را کپی کنید و در ربات بفرستید
-🔹 فایل دانلود شده را دریافت کنید
+🔹 فایل‌های دانلود شده را دریافت کنید
 
 مثال: <code>https://www.instagram.com/p/ABC123/</code>
 """
@@ -249,6 +285,7 @@ def handle_instagram_link(message: Message):
         
         bot.delete_message(message.chat.id, processing_msg.message_id)
         
+        # ارسال فایل‌ها
         for media_type, file_path in media_files:
             try:
                 if media_type == 'video':
@@ -265,6 +302,14 @@ def handle_instagram_link(message: Message):
                             message.chat.id,
                             f,
                             caption=f"📸 {username}\n📥 @rezagrootz",
+                            reply_markup=back_button()
+                        )
+                elif media_type == 'audio':
+                    with open(file_path, 'rb') as f:
+                        bot.send_audio(
+                            message.chat.id,
+                            f,
+                            caption=f"🎵 {username}\n📥 @rezagrootz",
                             reply_markup=back_button()
                         )
                 db.add_download(user_id, url, media_type)
@@ -335,9 +380,12 @@ def callback_handler(call):
 ✅ اگر یکی خطا داد، روش بعدی رو امتحان میکنه
 
 🔹 <b>لینک‌های پشتیبانی:</b>
-• instagram.com/p/...
-• instagram.com/reel/...
-• instagram.com/tv/...
+• instagram.com/p/... (عکس یا ویدیو)
+• instagram.com/reel/... (ریل)
+• instagram.com/tv/... (ویدیو)
+
+🎵 <b>ویژگی جدید:</b>
+برای ویدیو و ریل، صدای آن نیز به صورت MP3 دانلود می‌شود.
 
 ⚠️ <b>نکات:</b>
 • پست‌های خصوصی قابل دانلود نیستند
@@ -351,11 +399,11 @@ def callback_handler(call):
 # ==================== اجرا ====================
 if __name__ == "__main__":
     print("=" * 70)
-    print("📥 ربات دانلود اینستاگرام (۳ روش)")
+    print("📥 ربات دانلود اینستاگرام (۳ روش + استخراج صدا)")
     print("=" * 70)
     print("💎 روش‌های دانلود:")
-    print("  1️⃣ instaloader")
-    print("  2️⃣ yt-dlp")
+    print("  1️⃣ yt-dlp (اولویت برای ویدیو + صدا)")
+    print("  2️⃣ instaloader (عکس و ویدیو)")
     print("  3️⃣ API (snapinsta)")
     print("=" * 70)
     
