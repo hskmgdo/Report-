@@ -1,5 +1,5 @@
 pyTelegramBotAPI
-instaloader
 yt-dlp
+instaloader
 requests
 beautifulsoup4
