@@ -8,10 +8,10 @@ import shutil
 import threading
 import sqlite3
 import json
+import subprocess
 from datetime import datetime
-import yt_dlp
-import instaloader
 from pathlib import Path
+import yt_dlp
 
 # ==================== تنظیمات ====================
 BOT_TOKEN = "8423981755:AAFaEYzOefEaxDiuyvKKyyTJzlhDXWSqyRw"
@@ -49,185 +49,19 @@ class Database:
     def get_stats(self, user_id):
         self.cursor.execute("SELECT COUNT(*) FROM downloads WHERE user_id = ?", (user_id,))
         return self.cursor.fetchone()[0]
-    
-    def get_platform_stats(self, user_id):
-        self.cursor.execute(
-            "SELECT platform, COUNT(*) FROM downloads WHERE user_id = ? GROUP BY platform",
-            (user_id,)
-        )
-        return self.cursor.fetchall()
 
 db = Database()
 
-# ==================== کلاس دانلودر پیشرفته ====================
-class AdvancedDownloader:
-    
-    @staticmethod
-    def detect_platform(url):
-        """تشخیص پلتفرم از روی لینک"""
-        if re.search(r'(youtube\.com|youtu\.be)', url):
-            return 'youtube'
-        elif re.search(r'(instagram\.com|instagr\.am)', url):
-            return 'instagram'
-        elif re.search(r'(tiktok\.com|vm\.tiktok)', url):
-            return 'tiktok'
-        elif re.search(r'(twitter\.com|x\.com)', url):
-            return 'twitter'
-        elif re.search(r'(soundcloud\.com)', url):
-            return 'soundcloud'
-        elif re.search(r'(spotify\.com)', url):
-            return 'spotify'
-        elif re.search(r'(aparat\.com)', url):
-            return 'aparat'
-        elif re.search(r'(telegram\.org|t\.me)', url):
-            return 'telegram'
-        else:
-            return 'unknown'
-    
-    @staticmethod
-    def download_with_ytdlp(url, user_id, audio_only=False, quality='best'):
-        """دانلود با yt-dlp (پشتیبانی از یوتیوب، اینستاگرام، تیک‌تاک و...)"""
-        temp_dir = f"temp_{user_id}_{int(time.time())}"
-        os.makedirs(temp_dir, exist_ok=True)
-        
-        try:
-            if audio_only:
-                # دانلود فقط صدا
-                ydl_opts = {
-                    'outtmpl': f'{temp_dir}/%(title)s.%(ext)s',
-                    'quiet': True,
-                    'no_warnings': True,
-                    'format': 'bestaudio/best',
-                    'postprocessors': [{
-                        'key': 'FFmpegExtractAudio',
-                        'preferredcodec': 'mp3',
-                        'preferredquality': '320',
-                    }],
-                    'extract_flat': False,
-                    'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                }
-            else:
-                # دانلود ویدیو
-                ydl_opts = {
-                    'outtmpl': f'{temp_dir}/%(title)s.%(ext)s',
-                    'quiet': True,
-                    'no_warnings': True,
-                    'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-                    'merge_output_format': 'mp4',
-                    'extract_flat': False,
-                    'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                }
-            
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                if info:
-                    # پیدا کردن فایل دانلود شده
-                    files = os.listdir(temp_dir)
-                    for file in files:
-                        file_path = os.path.join(temp_dir, file)
-                        if os.path.isfile(file_path):
-                            # تشخیص نوع فایل
-                            if file.endswith(('.mp3', '.m4a', '.aac', '.wav')):
-                                return [('audio', file_path)], info.get('title', 'فایل'), info.get('uploader', '')
-                            elif file.endswith(('.mp4', '.mov', '.avi', '.mkv')):
-                                return [('video', file_path)], info.get('title', 'فایل'), info.get('uploader', '')
-                            elif file.endswith(('.jpg', '.jpeg', '.png', '.gif')):
-                                return [('photo', file_path)], info.get('title', 'فایل'), info.get('uploader', '')
-            
-            # پاک کردن پوشه
-            def cleanup():
-                time.sleep(5)
-                try:
-                    shutil.rmtree(temp_dir)
-                except:
-                    pass
-            threading.Thread(target=cleanup, daemon=True).start()
-            
-            return None, None, "فایلی پیدا نشد"
-            
-        except Exception as e:
-            # پاک کردن پوشه
-            try:
-                shutil.rmtree(temp_dir)
-            except:
-                pass
-            return None, None, str(e)[:200]
-    
-    @staticmethod
-    def download_instagram(url, user_id):
-        """دانلود از اینستاگرام با instaloader"""
-        temp_dir = f"temp_{user_id}_{int(time.time())}"
-        os.makedirs(temp_dir, exist_ok=True)
-        
-        try:
-            loader = instaloader.Instaloader(
-                download_pictures=True,
-                download_videos=True,
-                download_video_thumbnails=False,
-                compress_json=False,
-                save_metadata=False,
-                post_metadata_txt_pattern="",
-                max_connection_attempts=3
-            )
-            loader.quiet = True
-            loader.sleep = True
-            loader.dirname_pattern = temp_dir
-            
-            post = instaloader.Post.from_url(loader.context, url)
-            loader.download_post(post, target=f"{temp_dir}/{post.owner_username}")
-            
-            files = os.listdir(temp_dir)
-            media_files = []
-            for file in files:
-                file_path = os.path.join(temp_dir, file)
-                if os.path.isfile(file_path):
-                    if file.endswith(('.mp4', '.mov', '.avi')):
-                        media_files.append(('video', file_path))
-                    elif file.endswith(('.jpg', '.jpeg', '.png', '.gif')):
-                        media_files.append(('photo', file_path))
-            
-            def cleanup():
-                time.sleep(5)
-                try:
-                    shutil.rmtree(temp_dir)
-                except:
-                    pass
-            threading.Thread(target=cleanup, daemon=True).start()
-            
-            if media_files:
-                return media_files, post.owner_username, post.caption
-            return None, None, "فایلی پیدا نشد"
-            
-        except Exception as e:
-            try:
-                shutil.rmtree(temp_dir)
-            except:
-                pass
-            return None, None, str(e)[:200]
-
-# ==================== کیبوردهای رنگی ====================
+# ==================== کیبوردها ====================
 def main_menu():
     keyboard = InlineKeyboardMarkup(row_width=2)
     keyboard.add(
-        InlineKeyboardButton("📥 دانلود یوتیوب", callback_data="youtube"),
+        InlineKeyboardButton("🎬 دانلود یوتیوب", callback_data="youtube"),
         InlineKeyboardButton("🎵 دانلود آهنگ", callback_data="music"),
-        InlineKeyboardButton("📸 دانلود اینستاگرام", callback_data="instagram"),
+        InlineKeyboardButton("📸 اینستاگرام", callback_data="instagram"),
         InlineKeyboardButton("🎬 دانلود کلیپ", callback_data="clip"),
-        InlineKeyboardButton("🔗 لینک مستقیم", callback_data="direct"),
         InlineKeyboardButton("📊 آمار من", callback_data="stats"),
-        InlineKeyboardButton("🆘 راهنما", callback_data="help"),
-        InlineKeyboardButton("📢 کانال ما", url="https://t.me/rezagrootz")
-    )
-    return keyboard
-
-def quality_menu(platform):
-    keyboard = InlineKeyboardMarkup(row_width=2)
-    keyboard.add(
-        InlineKeyboardButton("📱 کیفیت بالا (1080p)", callback_data=f"quality_high_{platform}"),
-        InlineKeyboardButton("📱 کیفیت متوسط (720p)", callback_data=f"quality_med_{platform}"),
-        InlineKeyboardButton("📱 کیفیت پایین (480p)", callback_data=f"quality_low_{platform}"),
-        InlineKeyboardButton("🎵 فقط صدا (MP3)", callback_data=f"quality_audio_{platform}"),
-        InlineKeyboardButton("🔙 بازگشت", callback_data="back_main")
+        InlineKeyboardButton("🆘 راهنما", callback_data="help")
     )
     return keyboard
 
@@ -236,147 +70,299 @@ def back_button():
     keyboard.add(InlineKeyboardButton("🔙 بازگشت", callback_data="back_main"))
     return keyboard
 
+# ==================== کلاس دانلودر ====================
+class Downloader:
+    
+    @staticmethod
+    def download_media(url, user_id, audio_only=False):
+        """دانلود از هر پلتفرمی با yt-dlp"""
+        
+        # ایجاد پوشه موقت
+        temp_dir = f"temp_{user_id}_{int(time.time())}"
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        try:
+            # تنظیمات yt-dlp
+            if audio_only:
+                ydl_opts = {
+                    'outtmpl': f'{temp_dir}/%(title)s.%(ext)s',
+                    'quiet': True,
+                    'no_warnings': True,
+                    'extract_flat': False,
+                    'format': 'bestaudio/best',
+                    'postprocessors': [{
+                        'key': 'FFmpegExtractAudio',
+                        'preferredcodec': 'mp3',
+                        'preferredquality': '192',
+                    }],
+                    'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'socket_timeout': 30,
+                    'retries': 10,
+                    'fragment_retries': 10,
+                    'ignoreerrors': True
+                }
+            else:
+                ydl_opts = {
+                    'outtmpl': f'{temp_dir}/%(title)s.%(ext)s',
+                    'quiet': True,
+                    'no_warnings': True,
+                    'format': 'best[ext=mp4]/best',
+                    'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'socket_timeout': 30,
+                    'retries': 10,
+                    'fragment_retries': 10,
+                    'ignoreerrors': True
+                }
+            
+            # دانلود
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                
+                if not info:
+                    return None, None, "خطا: اطلاعات ویدیو دریافت نشد"
+                
+                # پیدا کردن فایل دانلود شده
+                files = os.listdir(temp_dir)
+                if not files:
+                    return None, None, "خطا: فایلی دانلود نشد"
+                
+                # پیدا کردن فایل اصلی
+                media_file = None
+                for file in files:
+                    file_path = os.path.join(temp_dir, file)
+                    if os.path.isfile(file_path) and os.path.getsize(file_path) > 1024:  # بزرگتر از 1KB
+                        media_file = file_path
+                        break
+                
+                if not media_file:
+                    return None, None, "خطا: فایل معتبری پیدا نشد"
+                
+                # تشخیص نوع فایل
+                if media_file.endswith(('.mp3', '.m4a', '.aac', '.wav')):
+                    media_type = 'audio'
+                elif media_file.endswith(('.mp4', '.mov', '.avi', '.mkv')):
+                    media_type = 'video'
+                else:
+                    media_type = 'other'
+                
+                # گرفتن عنوان
+                title = info.get('title', 'فایل')
+                uploader = info.get('uploader', 'ناشناس')
+                
+                # پاک کردن پوشه بعد از دانلود
+                def cleanup():
+                    time.sleep(10)
+                    try:
+                        shutil.rmtree(temp_dir, ignore_errors=True)
+                    except:
+                        pass
+                threading.Thread(target=cleanup, daemon=True).start()
+                
+                return [(media_type, media_file)], title, uploader
+                
+        except Exception as e:
+            # پاک کردن پوشه در صورت خطا
+            try:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            except:
+                pass
+            return None, None, str(e)[:200]
+    
+    @staticmethod
+    def detect_platform(url):
+        """تشخیص پلتفرم"""
+        patterns = {
+            'youtube': r'(youtube\.com|youtu\.be)',
+            'instagram': r'(instagram\.com|instagr\.am)',
+            'tiktok': r'(tiktok\.com|vm\.tiktok)',
+            'twitter': r'(twitter\.com|x\.com)',
+            'soundcloud': r'(soundcloud\.com)',
+            'aparat': r'(aparat\.com)',
+            'telegram': r'(t\.me|telegram\.org)'
+        }
+        
+        for platform, pattern in patterns.items():
+            if re.search(pattern, url, re.IGNORECASE):
+                return platform
+        return 'unknown'
+
 # ==================== دستور /start ====================
 @bot.message_handler(commands=['start'])
 def start_command(message: Message):
     text = """
-🌟 <b>ربات دانلودر فوق‌پیشرفته REZA GROOTZ</b> 🌟
+🌟 <b>ربات دانلودر فوق‌پیشرفته</b> 🌟
 
-⚡️ <b>قابلیت‌های بی‌نظیر:</b>
-✅ دانلود از یوتیوب (ویدیو و آهنگ)
-✅ دانلود از اینستاگرام (پست، ریل، استوری)
-✅ دانلود از تیک‌تاک
-✅ دانلود از توییتر/X
-✅ دانلود از آپارات
-✅ دانلود کلیپ و ویدیو کوتاه
-✅ تبدیل ویدیو به آهنگ (MP3)
-✅ کیفیت‌های مختلف (1080p, 720p, 480p)
-✅ سرعت فوق‌العاده بالا
+⚡️ <b>قابلیت‌ها:</b>
+✅ دانلود از یوتیوب
+✅ دانلود آهنگ (تبدیل به MP3)
+✅ دانلود از اینستاگرام
+✅ دانلود کلیپ و ریل
+✅ پشتیبانی از تیک‌تاک، توییتر، آپارات و...
 
 📌 <b>چطور استفاده کنم؟</b>
 🔹 گزینه مورد نظر را انتخاب کنید
 🔹 لینک را بفرستید
-🔹 فایل دانلود شده را دریافت کنید
+🔹 فایل را دریافت کنید
 
-💡 <b>پشتیبانی از:</b> یوتیوب • اینستاگرام • تیک‌تاک • توییتر • آپارات • و...
+💡 <b>فقط کافیه لینک رو بفرستی!</b>
 """
     bot.reply_to(message, text, reply_markup=main_menu())
 
 # ==================== دریافت لینک ====================
 @bot.message_handler(func=lambda message: True)
-def handle_link(message: Message):
+def handle_links(message: Message):
     user_id = message.from_user.id
     text = message.text.strip()
     
+    # اگر دستورات خاص باشه
+    if text.startswith('/'):
+        return
+    
     # تشخیص پلتفرم
-    platform = AdvancedDownloader.detect_platform(text)
+    platform = Downloader.detect_platform(text)
     
     if platform == 'unknown':
-        if text.lower() in ['دانلود', 'download', 'لینک', 'link']:
-            bot.reply_to(message, "📥 لطفاً لینک مورد نظر را ارسال کنید.\n\nمثال:\n• یوتیوب: https://youtube.com/watch?v=...\n• اینستاگرام: https://instagram.com/p/...")
+        if len(text) > 10 and ('http' in text or 'www' in text):
+            # تلاش برای دانلود با لینک مستقیم
+            processing_msg = bot.reply_to(message, "⏳ در حال دانلود لینک مستقیم...")
+            try:
+                response = requests.get(text, stream=True, timeout=30)
+                if response.status_code == 200:
+                    content_type = response.headers.get('content-type', '')
+                    filename = f"temp_{user_id}_{int(time.time())}.mp4"
+                    
+                    if 'video' in content_type:
+                        filename = filename.replace('.mp4', '.mp4')
+                    elif 'image' in content_type:
+                        filename = filename.replace('.mp4', '.jpg')
+                    elif 'audio' in content_type:
+                        filename = filename.replace('.mp4', '.mp3')
+                    else:
+                        filename = filename.replace('.mp4', '.bin')
+                    
+                    with open(filename, 'wb') as f:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            if chunk:
+                                f.write(chunk)
+                    
+                    # ارسال فایل
+                    with open(filename, 'rb') as f:
+                        if filename.endswith('.mp4'):
+                            bot.send_video(message.chat.id, f, caption="📥 لینک مستقیم @rezagrootz")
+                        elif filename.endswith(('.jpg', '.png')):
+                            bot.send_photo(message.chat.id, f, caption="📥 لینک مستقیم @rezagrootz")
+                        elif filename.endswith('.mp3'):
+                            bot.send_audio(message.chat.id, f, caption="📥 لینک مستقیم @rezagrootz")
+                        else:
+                            bot.send_document(message.chat.id, f, caption="📥 لینک مستقیم @rezagrootz")
+                    
+                    os.remove(filename)
+                    bot.delete_message(message.chat.id, processing_msg.message_id)
+                    return
+                else:
+                    bot.edit_message_text("❌ لینک معتبر نیست!", message.chat.id, processing_msg.message_id)
+                    return
+            except Exception as e:
+                bot.edit_message_text(f"❌ خطا: {str(e)[:100]}", message.chat.id, processing_msg.message_id)
+                return
         else:
-            bot.reply_to(message, "❌ لینک معتبری یافت نشد!\nلطفاً لینک را به درستی ارسال کنید.", reply_markup=main_menu())
+            bot.reply_to(message, "❌ لینک معتبری یافت نشد!\nلطفاً یک لینک معتبر بفرستید.", reply_markup=main_menu())
         return
     
     # پردازش لینک
-    processing_msg = bot.reply_to(message, f"⏳ در حال پردازش لینک از {platform}...")
+    processing_msg = bot.reply_to(message, f"⏳ در حال دانلود از {platform}...")
     
-    try:
-        if platform == 'youtube':
-            # دانلود از یوتیوب
-            media_files, title, uploader = AdvancedDownloader.download_with_ytdlp(text, user_id, audio_only=False)
-        elif platform == 'instagram':
-            media_files, title, uploader = AdvancedDownloader.download_instagram(text, user_id)
-        else:
-            # سایر پلتفرم‌ها با yt-dlp
-            media_files, title, uploader = AdvancedDownloader.download_with_ytdlp(text, user_id, audio_only=False)
-        
-        if not media_files:
-            bot.edit_message_text(
-                f"❌ خطا در دانلود!\n\n🔹 <b>پلتفرم:</b> {platform}\n🔹 <b>خطا:</b> {uploader}\n\n💡 ممکن است:\n• لینک اشتباه باشد\n• محتوا خصوصی باشد\n• محدودیت منطقه‌ای وجود داشته باشد",
-                message.chat.id,
-                processing_msg.message_id,
-                reply_markup=back_button()
-            )
-            return
-        
-        bot.delete_message(message.chat.id, processing_msg.message_id)
-        
-        # ارسال فایل‌ها
-        for media_type, file_path in media_files:
-            try:
-                if media_type == 'video':
-                    with open(file_path, 'rb') as f:
-                        bot.send_video(
-                            message.chat.id,
-                            f,
-                            caption=f"🎬 <b>{title[:50]}</b>\n👤 {uploader}\n📥 @rezagrootz",
-                            reply_markup=back_button()
-                        )
-                elif media_type == 'audio':
-                    with open(file_path, 'rb') as f:
-                        bot.send_audio(
-                            message.chat.id,
-                            f,
-                            caption=f"🎵 <b>{title[:50]}</b>\n👤 {uploader}\n📥 @rezagrootz",
-                            reply_markup=back_button()
-                        )
-                elif media_type == 'photo':
-                    with open(file_path, 'rb') as f:
-                        bot.send_photo(
-                            message.chat.id,
-                            f,
-                            caption=f"📸 <b>{title[:50]}</b>\n📥 @rezagrootz",
-                            reply_markup=back_button()
-                        )
-                
-                db.add_download(user_id, text, media_type, platform)
-                
-            except Exception as e:
-                bot.send_message(message.chat.id, f"❌ خطا در ارسال: {str(e)[:100]}")
-        
-        # پاک کردن پوشه
-        temp_dir = os.path.dirname(file_path) if media_files else None
-        if temp_dir and os.path.exists(temp_dir):
-            try:
-                shutil.rmtree(temp_dir)
-            except:
-                pass
-        
-    except Exception as e:
+    # دانلود
+    media_files, title, uploader = Downloader.download_media(text, user_id, audio_only=False)
+    
+    if not media_files:
         bot.edit_message_text(
-            f"❌ خطا: {str(e)[:200]}",
+            f"❌ خطا در دانلود!\n\n🔹 پلتفرم: {platform}\n🔹 خطا: {uploader}\n\n💡 نکات:\n• لینک رو چک کن\n• از VPN استفاده کن\n• دوباره تلاش کن",
             message.chat.id,
-            processing_msg.message_id
+            processing_msg.message_id,
+            reply_markup=back_button()
         )
+        return
+    
+    # حذف پیام پردازش
+    bot.delete_message(message.chat.id, processing_msg.message_id)
+    
+    # ارسال فایل‌ها
+    for media_type, file_path in media_files:
+        try:
+            # بررسی حجم فایل
+            file_size = os.path.getsize(file_path) / (1024 * 1024)  # تبدیل به مگابایت
+            if file_size > 50:  # اگر بزرگتر از 50 مگابایت بود
+                bot.send_message(
+                    message.chat.id,
+                    f"⚠️ حجم فایل {file_size:.1f} مگابایت است. ممکن است ارسال آن طول بکشد..."
+                )
+            
+            with open(file_path, 'rb') as f:
+                if media_type == 'video':
+                    bot.send_video(
+                        message.chat.id,
+                        f,
+                        caption=f"🎬 <b>{title[:50]}</b>\n👤 {uploader}\n📥 @rezagrootz",
+                        reply_markup=back_button()
+                    )
+                elif media_type == 'audio':
+                    bot.send_audio(
+                        message.chat.id,
+                        f,
+                        caption=f"🎵 <b>{title[:50]}</b>\n👤 {uploader}\n📥 @rezagrootz",
+                        reply_markup=back_button()
+                    )
+                else:
+                    bot.send_document(
+                        message.chat.id,
+                        f,
+                        caption=f"📄 <b>{title[:50]}</b>\n📥 @rezagrootz",
+                        reply_markup=back_button()
+                    )
+            
+            db.add_download(user_id, text, media_type, platform)
+            
+        except Exception as e:
+            bot.send_message(message.chat.id, f"❌ خطا در ارسال: {str(e)[:100]}")
+    
+    # پاک کردن فایل موقت
+    try:
+        os.remove(file_path)
+    except:
+        pass
+    
+    # پاک کردن پوشه
+    temp_dir = os.path.dirname(file_path)
+    try:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+    except:
+        pass
 
 # ==================== کال‌بک‌ها ====================
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
-    user_id = call.from_user.id
     data = call.data
     
     if data == "back_main":
-        text = "🌟 <b>منوی اصلی ربات دانلودر</b>"
+        text = "🌟 <b>منوی اصلی</b>"
         bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=main_menu())
         bot.answer_callback_query(call.id)
         return
     
     if data == "youtube":
-        text = """
-🎬 <b>دانلود از یوتیوب</b>
-
-📌 لینک ویدیو یا لیست پخش را بفرستید.
-
-📌 <b>کیفیت مورد نظر را انتخاب کنید:</b>
-"""
-        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=quality_menu('youtube'))
+        bot.edit_message_text(
+            "🎬 <b>دانلود از یوتیوب</b>\n\nلینک ویدیو یا لیست پخش را بفرستید.\n\n📌 کیفیت خودکار انتخاب میشه.",
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=back_button()
+        )
         bot.answer_callback_query(call.id)
         return
     
     if data == "music":
         bot.edit_message_text(
-            "🎵 <b>دانلود آهنگ</b>\n\nلینک آهنگ یا ویدیو را بفرستید تا به MP3 تبدیل کنم.\n\n📌 از یوتیوب، ساندکلاود و... پشتیبانی میکنم.",
+            "🎵 <b>دانلود آهنگ</b>\n\nلینک ویدیو یا آهنگ را بفرستید تا به MP3 تبدیل کنم.",
             call.message.chat.id,
             call.message.message_id,
             reply_markup=back_button()
@@ -396,17 +382,7 @@ def callback_handler(call):
     
     if data == "clip":
         bot.edit_message_text(
-            "🎬 <b>دانلود کلیپ و ویدیو کوتاه</b>\n\nلینک کلیپ از هر پلتفرمی (یوتیوب Shorts، اینستاگرام Reel، تیک‌تاک و...) را بفرستید.",
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=back_button()
-        )
-        bot.answer_callback_query(call.id)
-        return
-    
-    if data == "direct":
-        bot.edit_message_text(
-            "🔗 <b>دانلود با لینک مستقیم</b>\n\nلینک مستقیم فایل را بفرستید تا دانلود کنم.\n\n📌 پشتیبانی از: mp4, mp3, jpg, png, pdf, zip و...",
+            "🎬 <b>دانلود کلیپ</b>\n\nلینک کلیپ (Shorts/Reel/TikTok) را بفرستید.",
             call.message.chat.id,
             call.message.message_id,
             reply_markup=back_button()
@@ -415,104 +391,55 @@ def callback_handler(call):
         return
     
     if data == "stats":
-        total = db.get_stats(user_id)
-        platform_stats = db.get_platform_stats(user_id)
-        
+        total = db.get_stats(call.from_user.id)
         text = f"""
-📊 <b>آمار دانلودهای شما</b>
+📊 <b>آمار شما</b>
 ━━━━━━━━━━━━━━━━━━━━━━
-📥 تعداد کل: {total}
-
-<b>📈 تفکیک پلتفرم‌ها:</b>
+📥 تعداد دانلودها: {total}
+📅 تاریخ: {datetime.now().strftime('%Y-%m-%d %H:%M')}
+━━━━━━━━━━━━━━━━━━━━━━
 """
-        if platform_stats:
-            for platform, count in platform_stats:
-                emoji = {'youtube': '🎬', 'instagram': '📸', 'tiktok': '🎵', 'twitter': '🐦', 'soundcloud': '🎧'}.get(platform, '🔗')
-                text += f"{emoji} {platform}: {count}\n"
-        else:
-            text += "📭 هنوز دانلودی نداری!"
-        
-        text += "\n━━━━━━━━━━━━━━━━━━━━━━"
-        
         bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=back_button())
         bot.answer_callback_query(call.id)
         return
     
     if data == "help":
         text = """
-🆘 <b>راهنمای کامل ربات</b>
+🆘 <b>راهنما</b>
 ━━━━━━━━━━━━━━━━━━━━━━
 
-🎬 <b>دانلود یوتیوب:</b>
-• ویدیو با کیفیت 1080p/720p/480p
-• دانلود لیست پخش
-• دانلود زیرنویس
+🎬 <b>یوتیوب:</b> لینک ویدیو رو بفرست
+🎵 <b>آهنگ:</b> لینک ویدیو رو بفرست، MP3 میشه
+📸 <b>اینستاگرام:</b> لینک پست/ریل رو بفرست
+🎬 <b>کلیپ:</b> لینک Shorts/Reel رو بفرست
 
-🎵 <b>دانلود آهنگ:</b>
-• تبدیل ویدیو به MP3
-• کیفیت 320kbps
-• پشتیبانی از ساندکلاود
+🔹 <b>پشتیبانی از:</b>
+یوتیوب • اینستاگرام • تیک‌تاک • توییتر • آپارات • ساندکلاود
 
-📸 <b>اینستاگرام:</b>
-• پست، ریل، استوری
-• دانلود عکس و ویدیو
-• کیفیت اصلی
+⚠️ <b>نکات:</b>
+• لینک رو کامل بفرست
+• اگر تحریم هستی از VPN استفاده کن
+• حجم فایل‌ها محدود نیست
 
-🎬 <b>کلیپ:</b>
-• یوتیوب Shorts
-• اینستاگرام Reel
-• تیک‌تاک
-• ویدیوهای کوتاه
-
-🔗 <b>لینک مستقیم:</b>
-• هر فایل با لینک مستقیم
-
+📢 @rezagrootz
 ━━━━━━━━━━━━━━━━━━━━━━
-📢 <b>کانال ما:</b> @rezagrootz
 """
         bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=back_button())
-        bot.answer_callback_query(call.id)
-        return
-    
-    # ===== کیفیت =====
-    if data.startswith('quality_'):
-        parts = data.split('_')
-        quality = parts[1]
-        platform = parts[2]
-        
-        if quality == 'audio':
-            # دانلود فقط صدا
-            bot.edit_message_text(
-                f"🎵 <b>دانلود آهنگ از {platform}</b>\n\nلینک ویدیو یا آهنگ را بفرستید تا به MP3 تبدیل کنم.\n\nکیفیت: 320kbps",
-                call.message.chat.id,
-                call.message.message_id,
-                reply_markup=back_button()
-            )
-        else:
-            quality_map = {'high': '1080p', 'med': '720p', 'low': '480p'}
-            bot.edit_message_text(
-                f"🎬 <b>دانلود از {platform}</b>\n\nلینک ویدیو را بفرستید.\n\nکیفیت: {quality_map.get(quality, 'بهترین')}",
-                call.message.chat.id,
-                call.message.message_id,
-                reply_markup=back_button()
-            )
         bot.answer_callback_query(call.id)
         return
 
 # ==================== اجرا ====================
 if __name__ == "__main__":
     print("=" * 70)
-    print("🌟 ربات دانلودر فوق‌پیشرفته REZA GROOTZ")
+    print("🌟 ربات دانلودر فوق‌پیشرفته")
     print("=" * 70)
     print("💎 قابلیت‌ها:")
-    print("  ✅ دانلود از یوتیوب (ویدیو + آهنگ)")
+    print("  ✅ دانلود از یوتیوب")
+    print("  ✅ دانلود آهنگ (MP3)")
     print("  ✅ دانلود از اینستاگرام")
-    print("  ✅ دانلود از تیک‌تاک")
-    print("  ✅ دانلود از توییتر/X")
-    print("  ✅ دانلود از آپارات")
-    print("  ✅ دانلود کلیپ و ویدیو کوتاه")
-    print("  ✅ تبدیل ویدیو به MP3")
-    print("  ✅ کیفیت‌های مختلف (1080p, 720p, 480p)")
+    print("  ✅ دانلود کلیپ")
+    print("  ✅ پشتیبانی از تیک‌تاک، توییتر، آپارات")
+    print("  ✅ لینک مستقیم")
     print("=" * 70)
     
     while True:
@@ -520,5 +447,4 @@ if __name__ == "__main__":
             bot.polling(none_stop=True, interval=0, timeout=60)
         except Exception as e:
             print(f"❌ خطا: {e}")
-            print("🔄 راه‌اندازی مجدد در 5 ثانیه...")
             time.sleep(5)
