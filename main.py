@@ -1,6 +1,5 @@
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
-import instaloader
 import os
 import re
 import time
@@ -9,6 +8,9 @@ import shutil
 from datetime import datetime
 import threading
 import sqlite3
+import instaloader
+import yt_dlp
+from bs4 import BeautifulSoup
 
 # ==================== تنظیمات ====================
 BOT_TOKEN = "8423981755:AAFaEYzOefEaxDiuyvKKyyTJzlhDXWSqyRw"
@@ -48,73 +50,6 @@ class Database:
 
 db = Database()
 
-# ==================== کلاس دانلودر اینستاگرام ====================
-class InstagramDownloader:
-    def __init__(self):
-        self.loader = instaloader.Instaloader(
-            download_pictures=True,
-            download_videos=True,
-            download_video_thumbnails=False,
-            compress_json=False,
-            save_metadata=False,
-            post_metadata_txt_pattern="",
-            max_connection_attempts=3
-        )
-        # تنظیمات برای جلوگیری از بن شدن
-        self.loader.sleep = True
-        self.loader.quiet = True
-        
-    def download_post(self, url, user_id):
-        """دانلود پست اینستاگرام با لینک"""
-        try:
-            # ایجاد پوشه موقت
-            temp_dir = f"temp_{user_id}_{int(time.time())}"
-            os.makedirs(temp_dir, exist_ok=True)
-            
-            # تغییر مسیر ذخیره
-            self.loader.dirname_pattern = temp_dir
-            
-            # دانلود پست
-            post = instaloader.Post.from_url(self.loader.context, url)
-            self.loader.download_post(post, target=f"{temp_dir}/{post.owner_username}")
-            
-            # پیدا کردن فایل‌های دانلود شده
-            files = os.listdir(temp_dir)
-            media_files = []
-            
-            for file in files:
-                file_path = os.path.join(temp_dir, file)
-                if os.path.isfile(file_path):
-                    # تشخیص نوع فایل
-                    if file.endswith(('.mp4', '.mov')):
-                        media_files.append(('video', file_path))
-                    elif file.endswith(('.jpg', '.jpeg', '.png', '.gif')):
-                        media_files.append(('photo', file_path))
-            
-            # پاک کردن پوشه بعد از دانلود (با تاخیر)
-            def cleanup():
-                time.sleep(5)
-                try:
-                    shutil.rmtree(temp_dir)
-                except:
-                    pass
-            
-            threading.Thread(target=cleanup, daemon=True).start()
-            
-            return media_files, post.owner_username, post.caption
-            
-        except Exception as e:
-            return None, None, str(e)
-    
-    def download_reel(self, url, user_id):
-        """دانلود ریل اینستاگرام"""
-        return self.download_post(url, user_id)
-    
-    def download_story(self, url, user_id):
-        """دانلود استوری اینستاگرام (نیاز به لاگین)"""
-        # استوری نیاز به لاگین دارد، این روش پشتیبانی نمیشه
-        return None, None, "استوری نیاز به لاگین دارد! لطفاً از پست یا ریل استفاده کنید."
-
 # ==================== کیبوردها ====================
 def main_menu():
     keyboard = InlineKeyboardMarkup(row_width=2)
@@ -122,8 +57,7 @@ def main_menu():
         InlineKeyboardButton("📥 دانلود ویدیو", callback_data="download_video"),
         InlineKeyboardButton("📸 دانلود عکس", callback_data="download_photo"),
         InlineKeyboardButton("📊 آمار دانلودها", callback_data="stats"),
-        InlineKeyboardButton("🆘 راهنما", callback_data="help"),
-        InlineKeyboardButton("📢 کانال ما", url="https://t.me/rezagrootz")
+        InlineKeyboardButton("🆘 راهنما", callback_data="help")
     )
     return keyboard
 
@@ -132,32 +66,134 @@ def back_button():
     keyboard.add(InlineKeyboardButton("🔙 بازگشت", callback_data="back_main"))
     return keyboard
 
-# ==================== توابع کمکی ====================
-def is_admin(user_id):
-    return user_id in ADMIN_IDS
-
-def extract_instagram_url(text):
-    """استخراج لینک اینستاگرام از متن"""
-    pattern = r'(https?://(?:www\.)?instagram\.com/(?:p|reel|tv)/[a-zA-Z0-9_-]+/?)'
-    match = re.search(pattern, text)
-    if match:
-        return match.group(1)
-    return None
-
-def validate_url(url):
-    """بررسی اینکه لینک اینستاگرام معتبر است"""
-    if not url:
-        return False
-    patterns = [
-        r'instagram\.com/p/',
-        r'instagram\.com/reel/',
-        r'instagram\.com/tv/',
-        r'instagram\.com/stories/'
-    ]
-    for pattern in patterns:
-        if re.search(pattern, url):
-            return True
-    return False
+# ==================== روش‌های دانلود ====================
+class InstagramDownloader:
+    
+    # ===== روش 1: استفاده از instaloader =====
+    @staticmethod
+    def method_instaloader(url, temp_dir):
+        try:
+            loader = instaloader.Instaloader(
+                download_pictures=True,
+                download_videos=True,
+                download_video_thumbnails=False,
+                compress_json=False,
+                save_metadata=False,
+                post_metadata_txt_pattern="",
+                max_connection_attempts=3
+            )
+            loader.quiet = True
+            loader.sleep = True
+            loader.dirname_pattern = temp_dir
+            
+            post = instaloader.Post.from_url(loader.context, url)
+            loader.download_post(post, target=f"{temp_dir}/{post.owner_username}")
+            
+            # پیدا کردن فایل‌ها
+            files = os.listdir(temp_dir)
+            media_files = []
+            for file in files:
+                file_path = os.path.join(temp_dir, file)
+                if os.path.isfile(file_path):
+                    if file.endswith(('.mp4', '.mov', '.avi')):
+                        media_files.append(('video', file_path))
+                    elif file.endswith(('.jpg', '.jpeg', '.png', '.gif')):
+                        media_files.append(('photo', file_path))
+            
+            return media_files, post.owner_username, post.caption
+        except Exception as e:
+            return None, None, f"instaloader: {str(e)[:100]}"
+    
+    # ===== روش 2: استفاده از yt-dlp (برای ریل و ویدیو) =====
+    @staticmethod
+    def method_ytdlp(url, temp_dir):
+        try:
+            ydl_opts = {
+                'outtmpl': f'{temp_dir}/%(title)s.%(ext)s',
+                'quiet': True,
+                'no_warnings': True,
+                'extract_flat': False,
+                'format': 'best[ext=mp4]/best',
+                'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                if info:
+                    filename = ydl.prepare_filename(info)
+                    if os.path.exists(filename):
+                        return [('video', filename)], info.get('uploader', 'instagram'), info.get('description', '')
+            return None, None, "yt-dlp: فایلی پیدا نشد"
+        except Exception as e:
+            return None, None, f"yt-dlp: {str(e)[:100]}"
+    
+    # ===== روش 3: استفاده از API سایت‌های دانلود (snapinsta) =====
+    @staticmethod
+    def method_api(url, temp_dir):
+        try:
+            # استفاده از API رایگان snapinsta
+            response = requests.post(
+                'https://snapinsta.app/api/ajaxSearch',
+                data={'q': url},
+                headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'X-Requested-With': 'XMLHttpRequest'
+                },
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('success') and data.get('data'):
+                    video_url = data['data'][0].get('url')
+                    if video_url:
+                        # دانلود فایل
+                        response = requests.get(video_url, stream=True, timeout=30)
+                        if response.status_code == 200:
+                            filename = f"{temp_dir}/video_{int(time.time())}.mp4"
+                            with open(filename, 'wb') as f:
+                                for chunk in response.iter_content(chunk_size=1024*1024):
+                                    if chunk:
+                                        f.write(chunk)
+                            return [('video', filename)], 'instagram', 'دانلود شده با snapinsta'
+            return None, None, "API: خطا در دریافت لینک"
+        except Exception as e:
+            return None, None, f"API: {str(e)[:100]}"
+    
+    # ===== متد اصلی =====
+    @staticmethod
+    def download(url, user_id):
+        temp_dir = f"temp_{user_id}_{int(time.time())}"
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        results = []
+        methods = [
+            ('instaloader', InstagramDownloader.method_instaloader),
+            ('yt-dlp', InstagramDownloader.method_ytdlp),
+            ('API', InstagramDownloader.method_api)
+        ]
+        
+        for method_name, method_func in methods:
+            try:
+                media_files, username, caption = method_func(url, temp_dir)
+                if media_files:
+                    results = media_files
+                    break
+            except:
+                continue
+        
+        # پاک کردن پوشه بعد از دانلود
+        def cleanup():
+            time.sleep(5)
+            try:
+                shutil.rmtree(temp_dir)
+            except:
+                pass
+        threading.Thread(target=cleanup, daemon=True).start()
+        
+        if results:
+            return results, username or 'instagram', caption or 'بدون توضیحات'
+        return None, None, "همه روش‌ها ناموفق بودن!"
 
 # ==================== دستور /start ====================
 @bot.message_handler(commands=['start'])
@@ -166,16 +202,14 @@ def start_command(message: Message):
 📥 <b>ربات دانلود اینستاگرام REZA GROOTZ</b> 📥
 
 ⚡️ <b>قابلیت‌ها:</b>
-✅ دانلود ویدیو و ریل
+✅ دانلود با ۳ روش مختلف
+✅ پشتیبانی از پست، ریل، ویدیو
 ✅ دانلود عکس
-✅ دانلود پست‌های چندرسانه‌ای
-✅ پشتیبانی از لینک‌های مستقیم
 ✅ سرعت بالا
 ✅ کاملاً رایگان
 
 📌 <b>چطور استفاده کنم؟</b>
-🔹 لینک پست/ریل/عکس را کپی کنید
-🔹 در ربات بچسبانید و ارسال کنید
+🔹 لینک را کپی کنید و در ربات بفرستید
 🔹 فایل دانلود شده را دریافت کنید
 
 مثال: <code>https://www.instagram.com/p/ABC123/</code>
@@ -188,32 +222,33 @@ def handle_instagram_link(message: Message):
     user_id = message.from_user.id
     text = message.text.strip()
     
-    # استخراج لینک اینستاگرام
-    url = extract_instagram_url(text)
+    # استخراج لینک
+    pattern = r'(https?://(?:www\.)?instagram\.com/(?:p|reel|tv)/[a-zA-Z0-9_-]+/?)'
+    match = re.search(pattern, text)
     
-    if not url:
-        # بررسی اینکه آیا کاربر درخواست دانلود داده
-        if text.lower() in ['دانلود', 'download', 'لینک']:
-            bot.reply_to(message, "📥 لطفاً لینک اینستاگرام را ارسال کنید:\nمثال: https://www.instagram.com/p/ABC123/")
+    if not match:
+        if text.lower() in ['دانلود', 'download']:
+            bot.reply_to(message, "📥 لطفاً لینک اینستاگرام را ارسال کنید.")
         else:
-            bot.reply_to(message, "❌ لینک اینستاگرام معتبری یافت نشد!\nلطفاً لینک را به درستی ارسال کنید.")
+            bot.reply_to(message, "❌ لینک اینستاگرام معتبری یافت نشد!")
         return
     
-    # ارسال پیام در حال پردازش
-    processing_msg = bot.reply_to(message, "⏳ در حال پردازش و دانلود... لطفاً صبر کنید...")
+    url = match.group(1)
+    processing_msg = bot.reply_to(message, "⏳ در حال دانلود... لطفاً صبر کنید...")
     
     try:
-        # دانلود
-        downloader = InstagramDownloader()
-        media_files, username, caption = downloader.download_post(url, user_id)
+        media_files, username, caption = InstagramDownloader.download(url, user_id)
         
         if not media_files:
-            error_msg = f"❌ خطا در دانلود!\nمشکل: {caption}"
-            bot.edit_message_text(error_msg, message.chat.id, processing_msg.message_id)
+            bot.edit_message_text(
+                f"❌ خطا در دانلود!\nهمه روش‌ها ناموفق بودن.\n\n💡 نکات:\n• مطمئن شوید لینک درست است\n• پست خصوصی نباشد\n• از VPN استفاده کنید\n\n📢 @rezagrootz",
+                message.chat.id,
+                processing_msg.message_id
+            )
             return
         
-        # ارسال فایل‌ها
-        sent_count = 0
+        bot.delete_message(message.chat.id, processing_msg.message_id)
+        
         for media_type, file_path in media_files:
             try:
                 if media_type == 'video':
@@ -221,7 +256,7 @@ def handle_instagram_link(message: Message):
                         bot.send_video(
                             message.chat.id,
                             f,
-                            caption=f"🎬 {username}\n📥 دانلود شده در: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n💡 @rezagrootz",
+                            caption=f"🎬 {username}\n📥 @rezagrootz",
                             reply_markup=back_button()
                         )
                 elif media_type == 'photo':
@@ -229,30 +264,22 @@ def handle_instagram_link(message: Message):
                         bot.send_photo(
                             message.chat.id,
                             f,
-                            caption=f"📸 {username}\n📥 دانلود شده در: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n💡 @rezagrootz",
+                            caption=f"📸 {username}\n📥 @rezagrootz",
                             reply_markup=back_button()
                         )
-                sent_count += 1
-                # ذخیره در دیتابیس
                 db.add_download(user_id, url, media_type)
             except Exception as e:
                 bot.send_message(message.chat.id, f"❌ خطا در ارسال فایل: {str(e)[:100]}")
         
-        # حذف پیام پردازش
-        bot.delete_message(message.chat.id, processing_msg.message_id)
+        bot.send_message(
+            message.chat.id,
+            f"✅ دانلود با موفقیت انجام شد!",
+            reply_markup=back_button()
+        )
         
-        if sent_count == 0:
-            bot.send_message(message.chat.id, "❌ هیچ فایلی برای ارسال یافت نشد!", reply_markup=back_button())
-        else:
-            bot.send_message(
-                message.chat.id,
-                f"✅ {sent_count} فایل با موفقیت دانلود و ارسال شد!",
-                reply_markup=back_button()
-            )
-            
     except Exception as e:
         bot.edit_message_text(
-            f"❌ خطا در دانلود!\n{str(e)[:200]}",
+            f"❌ خطا: {str(e)[:200]}",
             message.chat.id,
             processing_msg.message_id
         )
@@ -260,33 +287,17 @@ def handle_instagram_link(message: Message):
 # ==================== کال‌بک‌ها ====================
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
-    user_id = call.from_user.id
     data = call.data
     
     if data == "back_main":
-        text = """
-📥 <b>ربات دانلود اینستاگرام REZA GROOTZ</b> 📥
-
-⚡️ <b>قابلیت‌ها:</b>
-✅ دانلود ویدیو و ریل
-✅ دانلود عکس
-✅ دانلود پست‌های چندرسانه‌ای
-✅ پشتیبانی از لینک‌های مستقیم
-✅ سرعت بالا
-✅ کاملاً رایگان
-
-📌 <b>چطور استفاده کنم؟</b>
-🔹 لینک پست/ریل/عکس را کپی کنید
-🔹 در ربات بچسبانید و ارسال کنید
-🔹 فایل دانلود شده را دریافت کنید
-"""
+        text = "📥 <b>ربات دانلود اینستاگرام</b>\nلینک را بفرستید تا دانلود کنم."
         bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=main_menu())
         bot.answer_callback_query(call.id)
         return
     
     if data == "download_video":
         bot.edit_message_text(
-            "🎬 لطفاً لینک ویدیو یا ریل اینستاگرام را ارسال کنید:\nمثال: https://www.instagram.com/reel/ABC123/",
+            "🎬 لینک ویدیو یا ریل را بفرستید:",
             call.message.chat.id,
             call.message.message_id,
             reply_markup=back_button()
@@ -296,7 +307,7 @@ def callback_handler(call):
     
     if data == "download_photo":
         bot.edit_message_text(
-            "📸 لطفاً لینک عکس اینستاگرام را ارسال کنید:\nمثال: https://www.instagram.com/p/ABC123/",
+            "📸 لینک عکس را بفرستید:",
             call.message.chat.id,
             call.message.message_id,
             reply_markup=back_button()
@@ -305,37 +316,32 @@ def callback_handler(call):
         return
     
     if data == "stats":
-        total = db.get_stats(user_id)
-        text = f"""
-📊 <b>آمار دانلودهای شما</b>
-━━━━━━━━━━━━━━━━━━━━━━
-📥 تعداد دانلودها: {total}
-━━━━━━━━━━━━━━━━━━━━━━
-"""
-        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=back_button())
+        total = db.get_stats(call.from_user.id)
+        bot.edit_message_text(
+            f"📊 تعداد دانلودها: {total}",
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=back_button()
+        )
         bot.answer_callback_query(call.id)
         return
     
     if data == "help":
         text = """
-🆘 <b>راهنمای ربات</b>
+🆘 <b>راهنما</b>
 ━━━━━━━━━━━━━━━━━━━━━━
-📌 <b>چطور دانلود کنم؟</b>
-1. لینک پست/ریل/عکس را کپی کنید
-2. در ربات بچسبانید و ارسال کنید
-3. فایل دانلود شده را دریافت کنید
+✅ لینک را کپی کنید و بفرستید
+✅ ربات با ۳ روش دانلود میکنه
+✅ اگر یکی خطا داد، روش بعدی رو امتحان میکنه
 
-🔹 <b>لینک‌های پشتیبانی شده:</b>
-• پست: instagram.com/p/...
-• ریل: instagram.com/reel/...
-• ویدیو: instagram.com/tv/...
+🔹 <b>لینک‌های پشتیبانی:</b>
+• instagram.com/p/...
+• instagram.com/reel/...
+• instagram.com/tv/...
 
-⚠️ <b>نکات مهم:</b>
+⚠️ <b>نکات:</b>
 • پست‌های خصوصی قابل دانلود نیستند
-• استوری نیاز به لاگین دارد
-• حجم فایل‌ها محدود نیست
-
-📢 <b>کانال ما:</b> @rezagrootz
+• اگر تحریم هستید، از VPN استفاده کنید
 ━━━━━━━━━━━━━━━━━━━━━━
 """
         bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=back_button())
@@ -345,14 +351,12 @@ def callback_handler(call):
 # ==================== اجرا ====================
 if __name__ == "__main__":
     print("=" * 70)
-    print("📥 ربات دانلود اینستاگرام REZA GROOTZ")
+    print("📥 ربات دانلود اینستاگرام (۳ روش)")
     print("=" * 70)
-    print("💎 قابلیت‌ها:")
-    print("  ✅ دانلود ویدیو/ریل")
-    print("  ✅ دانلود عکس")
-    print("  ✅ دانلود پست‌های چندرسانه‌ای")
-    print("  ✅ پشتیبانی از لینک‌های مستقیم")
-    print("  ✅ سرعت بالا")
+    print("💎 روش‌های دانلود:")
+    print("  1️⃣ instaloader")
+    print("  2️⃣ yt-dlp")
+    print("  3️⃣ API (snapinsta)")
     print("=" * 70)
     
     while True:
@@ -360,5 +364,4 @@ if __name__ == "__main__":
             bot.polling(none_stop=True, interval=0, timeout=60)
         except Exception as e:
             print(f"❌ خطا: {e}")
-            print("🔄 راه‌اندازی مجدد در 5 ثانیه...")
             time.sleep(5)
