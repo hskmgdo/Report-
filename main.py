@@ -1,58 +1,129 @@
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
+import instaloader
+import os
+import re
 import time
+import requests
+import shutil
 from datetime import datetime
+import threading
 import sqlite3
 
 # ==================== تنظیمات ====================
 BOT_TOKEN = "8423981755:AAFaEYzOefEaxDiuyvKKyyTJzlhDXWSqyRw"
-ADMIN_IDS = [8916314219]  # آیدی عددی خودت
+ADMIN_IDS = [8916314219]
 
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode='HTML')
 
-# ==================== دیتابیس (برای ذخیره تاریخچه جستجو) ====================
+# ==================== دیتابیس ====================
 class Database:
     def __init__(self):
-        self.conn = sqlite3.connect('user_search.db', check_same_thread=False)
+        self.conn = sqlite3.connect('instagram_bot.db', check_same_thread=False)
         self.cursor = self.conn.cursor()
         self._create_tables()
     
     def _create_tables(self):
         self.cursor.execute('''
-            CREATE TABLE IF NOT EXISTS search_history (
+            CREATE TABLE IF NOT EXISTS downloads (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                admin_id INTEGER,
-                searched_user_id INTEGER,
-                searched_username TEXT,
+                user_id INTEGER,
+                url TEXT,
+                type TEXT,
                 time INTEGER
             )
         ''')
         self.conn.commit()
     
-    def add_search(self, admin_id, user_id, username):
+    def add_download(self, user_id, url, media_type):
         self.cursor.execute(
-            "INSERT INTO search_history (admin_id, searched_user_id, searched_username, time) VALUES (?, ?, ?, ?)",
-            (admin_id, user_id, username, int(time.time()))
+            "INSERT INTO downloads (user_id, url, type, time) VALUES (?, ?, ?, ?)",
+            (user_id, url, media_type, int(time.time()))
         )
         self.conn.commit()
     
-    def get_history(self, admin_id, limit=10):
-        self.cursor.execute(
-            "SELECT searched_user_id, searched_username, time FROM search_history WHERE admin_id = ? ORDER BY id DESC LIMIT ?",
-            (admin_id, limit)
-        )
-        return self.cursor.fetchall()
+    def get_stats(self, user_id):
+        self.cursor.execute("SELECT COUNT(*) FROM downloads WHERE user_id = ?", (user_id,))
+        return self.cursor.fetchone()[0]
 
 db = Database()
+
+# ==================== کلاس دانلودر اینستاگرام ====================
+class InstagramDownloader:
+    def __init__(self):
+        self.loader = instaloader.Instaloader(
+            download_pictures=True,
+            download_videos=True,
+            download_video_thumbnails=False,
+            compress_json=False,
+            save_metadata=False,
+            post_metadata_txt_pattern="",
+            max_connection_attempts=3
+        )
+        # تنظیمات برای جلوگیری از بن شدن
+        self.loader.sleep = True
+        self.loader.quiet = True
+        
+    def download_post(self, url, user_id):
+        """دانلود پست اینستاگرام با لینک"""
+        try:
+            # ایجاد پوشه موقت
+            temp_dir = f"temp_{user_id}_{int(time.time())}"
+            os.makedirs(temp_dir, exist_ok=True)
+            
+            # تغییر مسیر ذخیره
+            self.loader.dirname_pattern = temp_dir
+            
+            # دانلود پست
+            post = instaloader.Post.from_url(self.loader.context, url)
+            self.loader.download_post(post, target=f"{temp_dir}/{post.owner_username}")
+            
+            # پیدا کردن فایل‌های دانلود شده
+            files = os.listdir(temp_dir)
+            media_files = []
+            
+            for file in files:
+                file_path = os.path.join(temp_dir, file)
+                if os.path.isfile(file_path):
+                    # تشخیص نوع فایل
+                    if file.endswith(('.mp4', '.mov')):
+                        media_files.append(('video', file_path))
+                    elif file.endswith(('.jpg', '.jpeg', '.png', '.gif')):
+                        media_files.append(('photo', file_path))
+            
+            # پاک کردن پوشه بعد از دانلود (با تاخیر)
+            def cleanup():
+                time.sleep(5)
+                try:
+                    shutil.rmtree(temp_dir)
+                except:
+                    pass
+            
+            threading.Thread(target=cleanup, daemon=True).start()
+            
+            return media_files, post.owner_username, post.caption
+            
+        except Exception as e:
+            return None, None, str(e)
+    
+    def download_reel(self, url, user_id):
+        """دانلود ریل اینستاگرام"""
+        return self.download_post(url, user_id)
+    
+    def download_story(self, url, user_id):
+        """دانلود استوری اینستاگرام (نیاز به لاگین)"""
+        # استوری نیاز به لاگین دارد، این روش پشتیبانی نمیشه
+        return None, None, "استوری نیاز به لاگین دارد! لطفاً از پست یا ریل استفاده کنید."
 
 # ==================== کیبوردها ====================
 def main_menu():
     keyboard = InlineKeyboardMarkup(row_width=2)
     keyboard.add(
-        InlineKeyboardButton("🔍 جستجوی کاربر", callback_data="search_user"),
-        InlineKeyboardButton("📋 تاریخچه جستجو", callback_data="search_history"),
-        InlineKeyboardButton("👤 اطلاعات خودم", callback_data="my_info"),
-        InlineKeyboardButton("🆘 راهنما", callback_data="help")
+        InlineKeyboardButton("📥 دانلود ویدیو", callback_data="download_video"),
+        InlineKeyboardButton("📸 دانلود عکس", callback_data="download_photo"),
+        InlineKeyboardButton("📊 آمار دانلودها", callback_data="stats"),
+        InlineKeyboardButton("🆘 راهنما", callback_data="help"),
+        InlineKeyboardButton("📢 کانال ما", url="https://t.me/rezagrootz")
     )
     return keyboard
 
@@ -65,128 +136,126 @@ def back_button():
 def is_admin(user_id):
     return user_id in ADMIN_IDS
 
-def format_user_info(user, chat_id=None):
-    """فرمت‌سازی اطلاعات کاربر به صورت زیبا"""
-    info = f"""
-👤 <b>اطلاعات کاربر</b>
-━━━━━━━━━━━━━━━━━━━━━━
-📛 <b>نام:</b> {user.first_name or 'نامشخص'}
-👥 <b>نام خانوادگی:</b> {user.last_name or 'نامشخص'}
-🆔 <b>آیدی عددی:</b> <code>{user.id}</code>
-🔖 <b>یوزرنیم:</b> {('@' + user.username) if user.username else 'ندارد'}
-📱 <b>شماره تماس:</b> {'دارد' if hasattr(user, 'phone') else 'نامشخص'}
-🤖 <b>ربات:</b> {'✅' if user.is_bot else '❌'}
-🔐 <b>پریمیوم:</b> {'✅' if user.is_premium else '❌'}
-"""
-    
-    # اگر chat_id داشته باشیم، اطلاعات گروه رو هم می‌گیریم
-    if chat_id:
-        try:
-            member = bot.get_chat_member(chat_id, user.id)
-            info += f"\n━━━━━━━━━━━━━━━━━━━━━━\n"
-            info += f"📊 <b>وضعیت در گروه:</b>\n"
-            info += f"👑 <b>نقش:</b> {member.status}\n"
-            
-            if member.status in ['administrator', 'creator']:
-                info += f"🔹 <b>مدیریت پیام‌ها:</b> {'✅' if member.can_delete_messages else '❌'}\n"
-                info += f"🔹 <b>بن کردن:</b> {'✅' if member.can_restrict_members else '❌'}\n"
-                info += f"🔹 <b>پین کردن:</b> {'✅' if member.can_pin_messages else '❌'}\n"
-        except:
-            pass
-    
-    info += f"\n━━━━━━━━━━━━━━━━━━━━━━"
-    return info
+def extract_instagram_url(text):
+    """استخراج لینک اینستاگرام از متن"""
+    pattern = r'(https?://(?:www\.)?instagram\.com/(?:p|reel|tv)/[a-zA-Z0-9_-]+/?)'
+    match = re.search(pattern, text)
+    if match:
+        return match.group(1)
+    return None
 
-def get_user_by_identifier(identifier):
-    """دریافت کاربر با آیدی یا یوزرنیم"""
-    try:
-        # اگر عدد بود، به عنوان آیدی در نظر بگیر
-        if identifier.isdigit():
-            user_id = int(identifier)
-            try:
-                user = bot.get_chat_member(user_id, user_id).user
-                return user
-            except:
-                return None
-        
-        # اگر با @ شروع شد یا یوزرنیم بود
-        if identifier.startswith('@'):
-            username = identifier
-        else:
-            username = f"@{identifier}"
-        
-        try:
-            # برای پیدا کردن کاربر با یوزرنیم از get_chat استفاده می‌کنیم
-            chat = bot.get_chat(username)
-            return chat
-        except:
-            return None
-    except:
-        return None
+def validate_url(url):
+    """بررسی اینکه لینک اینستاگرام معتبر است"""
+    if not url:
+        return False
+    patterns = [
+        r'instagram\.com/p/',
+        r'instagram\.com/reel/',
+        r'instagram\.com/tv/',
+        r'instagram\.com/stories/'
+    ]
+    for pattern in patterns:
+        if re.search(pattern, url):
+            return True
+    return False
 
 # ==================== دستور /start ====================
 @bot.message_handler(commands=['start'])
 def start_command(message: Message):
-    user_id = message.from_user.id
-    
-    if not is_admin(user_id):
-        bot.reply_to(message, "⛔ شما دسترسی به این ربات ندارید!")
-        return
-    
     text = """
-🔍 <b>ربات جستجوی اطلاعات تلگرام</b> 🔍
+📥 <b>ربات دانلود اینستاگرام REZA GROOTZ</b> 📥
 
 ⚡️ <b>قابلیت‌ها:</b>
-✅ دریافت اطلاعات کامل کاربر
-✅ نمایش نام، یوزرنیم، آیدی
-✅ وضعیت در گروه (اگر عضو باشد)
-✅ تاریخچه جستجو
-✅ دریافت عکس پروفایل
+✅ دانلود ویدیو و ریل
+✅ دانلود عکس
+✅ دانلود پست‌های چندرسانه‌ای
+✅ پشتیبانی از لینک‌های مستقیم
+✅ سرعت بالا
+✅ کاملاً رایگان
 
-📌 <b>برای جستجو:</b>
-• آیدی عددی کاربر را وارد کنید
-• یا یوزرنیم را با @ وارد کنید
+📌 <b>چطور استفاده کنم؟</b>
+🔹 لینک پست/ریل/عکس را کپی کنید
+🔹 در ربات بچسبانید و ارسال کنید
+🔹 فایل دانلود شده را دریافت کنید
 
-👑 <b>فقط برای ادمین‌ها قابل استفاده است!</b>
+مثال: <code>https://www.instagram.com/p/ABC123/</code>
 """
     bot.reply_to(message, text, reply_markup=main_menu())
 
-# ==================== دریافت پیام‌های حاوی آیدی ====================
+# ==================== دریافت لینک ====================
 @bot.message_handler(func=lambda message: True)
-def handle_search_message(message: Message):
+def handle_instagram_link(message: Message):
     user_id = message.from_user.id
-    
-    if not is_admin(user_id):
-        bot.reply_to(message, "⛔ شما دسترسی ندارید!")
-        return
-    
     text = message.text.strip()
     
-    # اگر عدد یا یوزرنیم بود
-    if text.isdigit() or text.startswith('@'):
-        # جستجوی کاربر
-        user = get_user_by_identifier(text)
+    # استخراج لینک اینستاگرام
+    url = extract_instagram_url(text)
+    
+    if not url:
+        # بررسی اینکه آیا کاربر درخواست دانلود داده
+        if text.lower() in ['دانلود', 'download', 'لینک']:
+            bot.reply_to(message, "📥 لطفاً لینک اینستاگرام را ارسال کنید:\nمثال: https://www.instagram.com/p/ABC123/")
+        else:
+            bot.reply_to(message, "❌ لینک اینستاگرام معتبری یافت نشد!\nلطفاً لینک را به درستی ارسال کنید.")
+        return
+    
+    # ارسال پیام در حال پردازش
+    processing_msg = bot.reply_to(message, "⏳ در حال پردازش و دانلود... لطفاً صبر کنید...")
+    
+    try:
+        # دانلود
+        downloader = InstagramDownloader()
+        media_files, username, caption = downloader.download_post(url, user_id)
         
-        if user:
-            # ذخیره در تاریخچه
-            db.add_search(user_id, user.id, user.username)
-            
-            # نمایش اطلاعات
-            info = format_user_info(user)
-            
-            # دکمه‌های بیشتر
-            keyboard = InlineKeyboardMarkup(row_width=2)
-            keyboard.add(
-                InlineKeyboardButton("🖼️ عکس پروفایل", callback_data=f"photo_{user.id}"),
-                InlineKeyboardButton("📋 کپی آیدی", callback_data=f"copy_{user.id}"),
-                InlineKeyboardButton("🔙 بازگشت", callback_data="back_main")
+        if not media_files:
+            error_msg = f"❌ خطا در دانلود!\nمشکل: {caption}"
+            bot.edit_message_text(error_msg, message.chat.id, processing_msg.message_id)
+            return
+        
+        # ارسال فایل‌ها
+        sent_count = 0
+        for media_type, file_path in media_files:
+            try:
+                if media_type == 'video':
+                    with open(file_path, 'rb') as f:
+                        bot.send_video(
+                            message.chat.id,
+                            f,
+                            caption=f"🎬 {username}\n📥 دانلود شده در: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n💡 @rezagrootz",
+                            reply_markup=back_button()
+                        )
+                elif media_type == 'photo':
+                    with open(file_path, 'rb') as f:
+                        bot.send_photo(
+                            message.chat.id,
+                            f,
+                            caption=f"📸 {username}\n📥 دانلود شده در: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n💡 @rezagrootz",
+                            reply_markup=back_button()
+                        )
+                sent_count += 1
+                # ذخیره در دیتابیس
+                db.add_download(user_id, url, media_type)
+            except Exception as e:
+                bot.send_message(message.chat.id, f"❌ خطا در ارسال فایل: {str(e)[:100]}")
+        
+        # حذف پیام پردازش
+        bot.delete_message(message.chat.id, processing_msg.message_id)
+        
+        if sent_count == 0:
+            bot.send_message(message.chat.id, "❌ هیچ فایلی برای ارسال یافت نشد!", reply_markup=back_button())
+        else:
+            bot.send_message(
+                message.chat.id,
+                f"✅ {sent_count} فایل با موفقیت دانلود و ارسال شد!",
+                reply_markup=back_button()
             )
             
-            bot.reply_to(message, info, reply_markup=keyboard)
-        else:
-            bot.reply_to(message, f"❌ کاربر با شناسه <code>{text}</code> یافت نشد!", parse_mode='HTML')
-    else:
-        bot.reply_to(message, "❌ لطفاً یک آیدی عددی یا یوزرنیم معتبر وارد کنید!")
+    except Exception as e:
+        bot.edit_message_text(
+            f"❌ خطا در دانلود!\n{str(e)[:200]}",
+            message.chat.id,
+            processing_msg.message_id
+        )
 
 # ==================== کال‌بک‌ها ====================
 @bot.callback_query_handler(func=lambda call: True)
@@ -194,146 +263,79 @@ def callback_handler(call):
     user_id = call.from_user.id
     data = call.data
     
-    if not is_admin(user_id):
-        bot.answer_callback_query(call.id, "⛔ شما دسترسی ندارید!")
-        return
-    
-    # ===== بازگشت =====
     if data == "back_main":
         text = """
-🔍 <b>ربات جستجوی اطلاعات تلگرام</b> 🔍
+📥 <b>ربات دانلود اینستاگرام REZA GROOTZ</b> 📥
 
 ⚡️ <b>قابلیت‌ها:</b>
-✅ دریافت اطلاعات کامل کاربر
-✅ نمایش نام، یوزرنیم، آیدی
-✅ وضعیت در گروه (اگر عضو باشد)
-✅ تاریخچه جستجو
-✅ دریافت عکس پروفایل
+✅ دانلود ویدیو و ریل
+✅ دانلود عکس
+✅ دانلود پست‌های چندرسانه‌ای
+✅ پشتیبانی از لینک‌های مستقیم
+✅ سرعت بالا
+✅ کاملاً رایگان
 
-📌 <b>برای جستجو:</b>
-• آیدی عددی کاربر را وارد کنید
-• یا یوزرنیم را با @ وارد کنید
-
-👑 <b>فقط برای ادمین‌ها قابل استفاده است!</b>
+📌 <b>چطور استفاده کنم؟</b>
+🔹 لینک پست/ریل/عکس را کپی کنید
+🔹 در ربات بچسبانید و ارسال کنید
+🔹 فایل دانلود شده را دریافت کنید
 """
         bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=main_menu())
         bot.answer_callback_query(call.id)
         return
     
-    # ===== جستجوی کاربر =====
-    if data == "search_user":
+    if data == "download_video":
         bot.edit_message_text(
-            "🔍 لطفاً آیدی عددی یا یوزرنیم کاربر را وارد کنید:\nمثال: <code>8916314219</code> یا <code>@rezagrootz</code>",
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=back_button(),
-            parse_mode='HTML'
-        )
-        bot.answer_callback_query(call.id)
-        return
-    
-    # ===== تاریخچه جستجو =====
-    if data == "search_history":
-        history = db.get_history(user_id)
-        
-        if not history:
-            text = "📭 شما هنوز جستجویی انجام نداده‌اید!"
-            bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=back_button())
-            bot.answer_callback_query(call.id)
-            return
-        
-        text = "📋 <b>تاریخچه جستجو</b>\n━━━━━━━━━━━━━━━━━━━━━━\n"
-        for i, (uid, username, timestamp) in enumerate(history, 1):
-            time_str = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M')
-            username_str = f"@{username}" if username else "بدون یوزرنیم"
-            text += f"{i}. <code>{uid}</code> - {username_str} ({time_str})\n"
-        
-        keyboard = InlineKeyboardMarkup(row_width=1)
-        keyboard.add(
-            InlineKeyboardButton("🗑️ پاک کردن تاریخچه", callback_data="clear_history"),
-            InlineKeyboardButton("🔙 بازگشت", callback_data="back_main")
-        )
-        
-        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=keyboard)
-        bot.answer_callback_query(call.id)
-        return
-    
-    # ===== پاک کردن تاریخچه =====
-    if data == "clear_history":
-        db.cursor.execute("DELETE FROM search_history WHERE admin_id = ?", (user_id,))
-        db.conn.commit()
-        bot.answer_callback_query(call.id, "✅ تاریخچه پاک شد!")
-        bot.edit_message_text(
-            "🗑️ تاریخچه جستجوی شما پاک شد.",
+            "🎬 لطفاً لینک ویدیو یا ریل اینستاگرام را ارسال کنید:\nمثال: https://www.instagram.com/reel/ABC123/",
             call.message.chat.id,
             call.message.message_id,
             reply_markup=back_button()
         )
-        return
-    
-    # ===== اطلاعات خودم =====
-    if data == "my_info":
-        user = bot.get_chat_member(call.message.chat.id, user_id).user
-        info = format_user_info(user)
-        bot.edit_message_text(info, call.message.chat.id, call.message.message_id, reply_markup=back_button())
         bot.answer_callback_query(call.id)
         return
     
-    # ===== عکس پروفایل =====
-    if data.startswith("photo_"):
-        target_id = int(data.split("_")[1])
-        try:
-            photos = bot.get_user_profile_photos(target_id, limit=1)
-            if photos.total_count > 0:
-                photo = photos.photos[0][-1]
-                bot.send_photo(
-                    call.message.chat.id,
-                    photo.file_id,
-                    caption=f"🖼️ عکس پروفایل کاربر <code>{target_id}</code>",
-                    parse_mode='HTML'
-                )
-                bot.answer_callback_query(call.id)
-            else:
-                bot.answer_callback_query(call.id, "❌ این کاربر عکس پروفایل ندارد!")
-        except:
-            bot.answer_callback_query(call.id, "❌ خطا در دریافت عکس!")
-        return
-    
-    # ===== کپی آیدی =====
-    if data.startswith("copy_"):
-        target_id = data.split("_")[1]
-        bot.send_message(
+    if data == "download_photo":
+        bot.edit_message_text(
+            "📸 لطفاً لینک عکس اینستاگرام را ارسال کنید:\nمثال: https://www.instagram.com/p/ABC123/",
             call.message.chat.id,
-            f"📋 آیدی کاربر: <code>{target_id}</code>",
-            parse_mode='HTML'
+            call.message.message_id,
+            reply_markup=back_button()
         )
-        bot.answer_callback_query(call.id, "✅ آیدی کپی شد!")
+        bot.answer_callback_query(call.id)
         return
     
-    # ===== راهنما =====
+    if data == "stats":
+        total = db.get_stats(user_id)
+        text = f"""
+📊 <b>آمار دانلودهای شما</b>
+━━━━━━━━━━━━━━━━━━━━━━
+📥 تعداد دانلودها: {total}
+━━━━━━━━━━━━━━━━━━━━━━
+"""
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=back_button())
+        bot.answer_callback_query(call.id)
+        return
+    
     if data == "help":
         text = """
 🆘 <b>راهنمای ربات</b>
 ━━━━━━━━━━━━━━━━━━━━━━
-🔹 <b>چگونه جستجو کنیم؟</b>
-• آیدی عددی کاربر را وارد کنید
-• یا یوزرنیم را با @ وارد کنید
-• مثال: 8916314219 یا @rezagrootz
+📌 <b>چطور دانلود کنم؟</b>
+1. لینک پست/ریل/عکس را کپی کنید
+2. در ربات بچسبانید و ارسال کنید
+3. فایل دانلود شده را دریافت کنید
 
-🔹 <b>چه اطلاعاتی نمایش داده میشه؟</b>
-• نام و نام خانوادگی
-• یوزرنیم
-• آیدی عددی
-• وضعیت پریمیوم
-• وضعیت در گروه (اگر عضو باشد)
-• نقش در گروه (ادمین/عادی)
+🔹 <b>لینک‌های پشتیبانی شده:</b>
+• پست: instagram.com/p/...
+• ریل: instagram.com/reel/...
+• ویدیو: instagram.com/tv/...
 
-🔹 <b>امکانات اضافه:</b>
-• مشاهده عکس پروفایل
-• کپی آیدی کاربر
-• تاریخچه جستجو
+⚠️ <b>نکات مهم:</b>
+• پست‌های خصوصی قابل دانلود نیستند
+• استوری نیاز به لاگین دارد
+• حجم فایل‌ها محدود نیست
 
-👑 <b>فقط ادمین‌ها!</b>
+📢 <b>کانال ما:</b> @rezagrootz
 ━━━━━━━━━━━━━━━━━━━━━━
 """
         bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=back_button())
@@ -343,16 +345,14 @@ def callback_handler(call):
 # ==================== اجرا ====================
 if __name__ == "__main__":
     print("=" * 70)
-    print("🔍 ربات جستجوی اطلاعات تلگرام")
+    print("📥 ربات دانلود اینستاگرام REZA GROOTZ")
     print("=" * 70)
-    print(f"👑 ادمین‌ها: {ADMIN_IDS}")
     print("💎 قابلیت‌ها:")
-    print("  ✅ جستجو با آیدی عددی")
-    print("  ✅ جستجو با یوزرنیم")
-    print("  ✅ نمایش اطلاعات کامل کاربر")
-    print("  ✅ نمایش وضعیت در گروه")
-    print("  ✅ دریافت عکس پروفایل")
-    print("  ✅ تاریخچه جستجو")
+    print("  ✅ دانلود ویدیو/ریل")
+    print("  ✅ دانلود عکس")
+    print("  ✅ دانلود پست‌های چندرسانه‌ای")
+    print("  ✅ پشتیبانی از لینک‌های مستقیم")
+    print("  ✅ سرعت بالا")
     print("=" * 70)
     
     while True:
